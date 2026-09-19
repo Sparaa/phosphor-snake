@@ -480,7 +480,11 @@ def run_gtk(args) -> int:
     win.set_default_size(1100, 720)
     css = Gtk.CssProvider(); css.load_from_data(b"window { background-color: #050001; }")
     Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-    img = Gtk.Image(); win.add(img)
+    # The image lives in a Gtk.Layout: a Layout never asks the window to grow to its child's size, so a frame that is
+    # exactly the content area cannot start a resize negotiation. (A bare Gtk.Image did, and on Wayland with client-
+    # side decorations the window allocation also includes the shadow margins → the window never settled and never
+    # showed a frame.)
+    layout = Gtk.Layout(); img = Gtk.Image(); layout.put(img, 0, 0); win.add(layout)
     keys = {"Up": "up", "Down": "down", "Left": "left", "Right": "right", "w": "up", "s": "down", "a": "left", "d": "right",
             "k": "up", "j": "down", "h": "left", "l": "right"}
     state = {"last": time.perf_counter(), "frames": 0, "t0": time.perf_counter(), "full": False}
@@ -504,7 +508,7 @@ def run_gtk(args) -> int:
         now = time.perf_counter()
         dt = min(0.1, now - state["last"]); state["last"] = now
         g.tick(dt)
-        alloc = win.get_allocation()
+        alloc = layout.get_allocation()                 # the content area, without any client-side decoration margins
         w, h = max(320, alloc.width), max(240, alloc.height)
         r.resize(w, h)
         surf = r.render(g)
