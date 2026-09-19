@@ -213,8 +213,8 @@ class Renderer:
     def __init__(self):
         self.size = (0, 0)
         self.surface = None
-        self.scan = None
-        self.vig = None
+        self.crt = None            # scanlines + vignette, one cached full-size layer
+        self.glyphs: dict[tuple, tuple] = {}   # (text, size, color, bold, glow) → (surface, pad, ascent, width)
 
     def resize(self, w: int, h: int) -> None:
         if (w, h) == self.size:
@@ -223,24 +223,47 @@ class Renderer:
         self.surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
         sl = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 3)
         c = cairo.Context(sl); c.set_source_rgba(0, 0, 0, 0.42); c.rectangle(0, 2, 1, 1); c.fill()
-        self.scan = cairo.SurfacePattern(sl); self.scan.set_extend(cairo.EXTEND_REPEAT); self.scan.set_filter(cairo.FILTER_NEAREST)
+        scan = cairo.SurfacePattern(sl); scan.set_extend(cairo.EXTEND_REPEAT); scan.set_filter(cairo.FILTER_NEAREST)
+        self.crt = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+        c = cairo.Context(self.crt)
+        c.set_source(scan); c.paint()
+        vig = cairo.RadialGradient(w / 2, h / 2, min(w, h) * 0.45, w / 2, h / 2, max(w, h) * 0.75)
+        vig.add_color_stop_rgba(0, 0, 0, 0, 0); vig.add_color_stop_rgba(0.6, 0.03, 0, 0, 0.35); vig.add_color_stop_rgba(1, 0, 0, 0, 0.85)
+        c.set_source(vig); c.paint()
 
-    # -- text with a phosphor glow
+    # -- text with a phosphor glow. Each distinct string is rasterised once (halo = three widening strokes at
+    # falling alpha) into a small surface and blitted afterwards: the strokes were 60 % of the frame time.
     def text(self, cr, x, y, s, size=13, color=TEXT, bold=True, glow=0.35, align="left"):
-        cr.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
-        cr.set_font_size(size)
-        ext = cr.text_extents(s)
+        key = (s, size, color, bold, glow)
+        hit = self.glyphs.get(key)
+        if hit is None:
+            if len(self.glyphs) > 512:
+                self.glyphs.clear()
+            cr.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
+            cr.set_font_size(size)
+            ext, fe = cr.text_extents(s), cr.font_extents()
+            pad = int(size * 0.5) + 2
+            gw, gh = int(math.ceil(ext.x_advance + abs(ext.x_bearing))) + pad * 2, int(math.ceil(fe[0] + fe[1])) + pad * 2
+            gs = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, gw), max(1, gh))
+            g = cairo.Context(gs)
+            g.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
+            g.set_font_size(size)
+            ox, oy = pad - min(0.0, ext.x_bearing), pad + fe[0]
+            if glow > 0:
+                g.set_line_join(cairo.LINE_JOIN_ROUND)
+                for width, alpha in ((0.75, 0.16), (0.42, 0.28), (0.18, 0.55)):
+                    g.move_to(ox, oy); g.text_path(s)
+                    g.set_source_rgba(*BLOOM, glow * alpha); g.set_line_width(size * width); g.stroke()
+            g.move_to(ox, oy); g.set_source_rgb(*color); g.show_text(s)
+            gs.flush()
+            hit = self.glyphs[key] = (gs, ox, oy, ext.width, ext.x_bearing)
+        gs, ox, oy, width, xb = hit
         if align == "center":
-            x -= ext.width / 2 + ext.x_bearing
+            x -= width / 2 + xb
         elif align == "right":
-            x -= ext.width + ext.x_bearing
-        if glow > 0:                                    # halo: three widening strokes at falling alpha
-            cr.set_line_join(cairo.LINE_JOIN_ROUND)
-            for width, alpha in ((0.75, 0.16), (0.42, 0.28), (0.18, 0.55)):
-                cr.move_to(x, y); cr.text_path(s)
-                cr.set_source_rgba(*BLOOM, glow * alpha); cr.set_line_width(size * width); cr.stroke()
-        cr.move_to(x, y); cr.set_source_rgb(*color); cr.show_text(s)
-        return ext.width
+            x -= width + xb
+        cr.set_source_surface(gs, x - ox, y - oy); cr.paint()
+        return width
 
     @staticmethod
     def rrect(cr, x, y, w, h, r):
@@ -406,15 +429,12 @@ class Renderer:
             age = g.t - ts
             self.text(cr, ix, yy, f"{int(ts) // 60:02d}:{int(ts) % 60:02d}  {msg}", 10, mix(TEXT_DIM, TEXT, max(0, 1 - age / 6)), glow=0.1); yy += 15
         self.text(cr, px + panel_w / 2, h - margin - 10, "▮ " + time.strftime("%H:%M:%S") + " ▮", 10, TEXT_DIM, glow=0.12, align="center")
-        # -- CRT layers: scanlines, rolling band, vignette, flicker
-        cr.set_source(self.scan); cr.paint()
+        # -- CRT layers: rolling band, then the cached scanlines + vignette, then flicker
         band_y = ((g.t % 7.0) / 7.0) * (h * 1.3) - h * 0.25
         band = cairo.LinearGradient(0, band_y, 0, band_y + h * 0.22)
         band.add_color_stop_rgba(0, 1, 0.24, 0.31, 0); band.add_color_stop_rgba(0.5, 1, 0.24, 0.31, 0.06); band.add_color_stop_rgba(1, 1, 0.24, 0.31, 0)
         cr.set_source(band); cr.rectangle(0, band_y, w, h * 0.22); cr.fill()
-        vig = cairo.RadialGradient(w / 2, h / 2, min(w, h) * 0.45, w / 2, h / 2, max(w, h) * 0.75)
-        vig.add_color_stop_rgba(0, 0, 0, 0, 0); vig.add_color_stop_rgba(0.6, 0.03, 0, 0, 0.35); vig.add_color_stop_rgba(1, 0, 0, 0, 0.85)
-        cr.set_source(vig); cr.paint()
+        cr.set_source_surface(self.crt, 0, 0); cr.paint()
         flick = 0.03 * (0.5 + 0.5 * math.sin(g.t * 37.0) * math.sin(g.t * 11.0))
         cr.set_source_rgba(0, 0, 0, flick); cr.paint()
         self.surface.flush()
@@ -504,12 +524,15 @@ def run_gtk(args) -> int:
             Gtk.main_quit()
         return True
 
-    def frame():
+    def frame(*_):
         now = time.perf_counter()
         dt = min(0.1, now - state["last"]); state["last"] = now
         g.tick(dt)
         alloc = layout.get_allocation()                 # the content area, without any client-side decoration margins
         w, h = max(320, alloc.width), max(240, alloc.height)
+        if (w, h) != r.size:
+            img.set_size_request(w, h)                  # a Layout allocates children by their request: without this the
+            layout.move(img, 0, 0)                      # image kept its empty 16x16 box and the frame was centred off-window
         r.resize(w, h)
         surf = r.render(g)
         im = Image.frombuffer("RGBA", (w, h), bytes(surf.get_data()), "raw", "BGRA", surf.get_stride(), 1).convert("RGB")
@@ -526,7 +549,10 @@ def run_gtk(args) -> int:
     win.show_all()
     if args.bench:
         g.reset(); g.state = "playing"
-    GLib.timeout_add(16, frame)
+    # Render inside GTK's frame clock (update phase), so every frame is followed by a paint. A plain 16 ms timeout
+    # at default priority that does ~15 ms of work is always due again the moment it returns and starves GTK's
+    # lower-priority redraw idle: the window stayed black on X11 and never mapped at all on Wayland.
+    win.add_tick_callback(frame)
     Gtk.main()
     return 0
 

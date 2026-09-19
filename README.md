@@ -37,8 +37,10 @@ high score lives in `~/.local/share/phosphor-snake/highscore.json`.
 
 GTK draw callbacks need the `gi` cairo bridge, which some distros ship separately (`python3-gi-cairo`). To depend on
 nothing extra, every frame is rendered with plain pycairo into an image surface and blitted into a `Gtk.Image` as a
-pixbuf, about 8 ms a frame at 1100×720 in pure Python. The static CRT layers (scanline pattern) are cached per window
-size; the roll band, vignette and flicker are cheap gradients painted on top.
+pixbuf. Rendering runs inside GTK's frame clock (`add_tick_callback`), so every update is followed by a paint; a plain
+timer that does most of a frame's work at default priority starves GTK's redraw and leaves the window black. Each
+glowing string is rasterised once and cached; the scanlines and vignette are one cached layer per window size. A
+frame costs about 4 ms at 1100×720, and both X11 and Wayland run at the display's 60 Hz.
 
 Tests (no GTK needed): `python3 -m unittest discover -s tests`.
 
