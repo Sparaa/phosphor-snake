@@ -26,27 +26,29 @@ import cairo
 def rgb(h: int) -> tuple[float, float, float]:
     return ((h >> 16 & 255) / 255, (h >> 8 & 255) / 255, (h & 255) / 255)
 
-BG = rgb(0x050001)        # window / outside the bezel
-DISC = rgb(0x080102)      # the field
-GRID = rgb(0x2a070c)      # scope furniture
-LINE = rgb(0x3a0a10)
-DIM = rgb(0x1d0508)       # embers
-TRAIL = rgb(0x7a101c)     # phosphor persistence
-LIT = rgb(0xd8182c)       # lit segments / body
-HOT = rgb(0xff4455)       # the tip / head
-PEAK = rgb(0xff6070)      # peak-hold marker
-BLOOM = rgb(0xff2a3c)
-TEXT = rgb(0xff2a3d)
-TEXT_DIM = rgb(0xa0141f)
-BEZEL = rgb(0xd8182c)
-FONT = "DejaVu Sans Mono"
-
 def mix(a, b, t):
     t = max(0.0, min(1.0, t))
     return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
 
 def scale(c, k):
     return (min(1, c[0] * k), min(1, c[1] * k), min(1, c[2] * k))
+
+BOOST = 1.5               # the lit phosphor sits 50 % above the scene palette so the red pops on a dark room's monitor
+BG = rgb(0x050001)        # window / outside the bezel
+DISC = rgb(0x080102)      # the field
+GRID = rgb(0x2a070c)      # scope furniture
+LINE = rgb(0x3a0a10)
+DIM = rgb(0x1d0508)       # embers
+TRAIL = scale(rgb(0x7a101c), BOOST)   # phosphor persistence
+LIT = scale(rgb(0xd8182c), BOOST)     # lit segments
+HOT = scale(rgb(0xff4455), BOOST)     # the tip
+PEAK = scale(rgb(0xff6070), BOOST)    # peak-hold marker
+BLOOM = rgb(0xff2a3c)
+TEXT = scale(rgb(0xff2a3d), BOOST)
+TEXT_DIM = scale(rgb(0xa0141f), BOOST)
+BEZEL = scale(rgb(0xd8182c), BOOST)
+SNAKE = LIT                           # one colour, head to tail
+FONT = "DejaVu Sans Mono"
 
 # ---------------------------------------------------------------------------------------------- game
 DIRS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
@@ -358,25 +360,27 @@ class Renderer:
             cr.set_source_rgb(*mix(LIT, HOT, pulse)); cr.arc(fxp, fyp, cell * 0.28, 0, 2 * math.pi); cr.fill()
             cr.set_source_rgba(*PEAK, 0.5 + 0.4 * pulse); cr.set_line_width(1.2)
             cr.arc(fxp, fyp, cell * (0.42 + 0.1 * pulse), 0, 2 * math.pi); cr.stroke()
-        # snake: tail → head, TRAIL → LIT, head HOT with bloom
+        # snake: one continuous rounded stroke through the cell centres, one colour head to tail (a sub-path
+        # restarts where the body wraps across the field edge); the head gets a soft aura, not a brighter body
         n = len(g.snake)
-        for i in range(n - 1, -1, -1):
-            cx, cy = g.snake[i]
-            k = 1 - i / max(1, n - 1)                       # 0 at tail, 1 at head
-            col = mix(TRAIL, LIT, 0.35 + 0.65 * k)
-            if i == 0:
-                col = HOT
-            if g.state == "over":
-                col = mix(col, DIM, 1 - g.burst)
-            cr.set_source_rgb(*col)
-            inset = 2 if i == 0 else 3
-            self.rrect(cr, gx + cx * cell + inset, gy + cy * cell + inset, cell - inset * 2, cell - inset * 2, 3)
-            cr.fill()
+        if n:
+            col = SNAKE if g.state != "over" else mix(SNAKE, DIM, 1 - g.burst)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.set_line_join(cairo.LINE_JOIN_ROUND); cr.set_line_width(cell * 0.68)
+            cr.new_path()
+            prev = None
+            for cx, cy in g.snake:
+                px, py = gx + (cx + 0.5) * cell, gy + (cy + 0.5) * cell
+                if prev is None or abs(cx - prev[0]) + abs(cy - prev[1]) != 1:
+                    cr.move_to(px, py); cr.line_to(px, py)      # a zero-length segment still draws its round cap
+                else:
+                    cr.line_to(px, py)
+                prev = (cx, cy)
+            cr.set_source_rgb(*col); cr.stroke()
         if n and g.state != "over":
             hx, hy = g.snake[0]
             hxp, hyp = gx + (hx + 0.5) * cell, gy + (hy + 0.5) * cell
-            grad = cairo.RadialGradient(hxp, hyp, 0, hxp, hyp, cell * 2.2)
-            grad.add_color_stop_rgba(0, *BLOOM, 0.28 + 0.3 * g.hit); grad.add_color_stop_rgba(1, *BLOOM, 0)
+            grad = cairo.RadialGradient(hxp, hyp, cell * 0.3, hxp, hyp, cell * 2.2)
+            grad.add_color_stop_rgba(0, *BLOOM, 0.3 + 0.3 * g.hit); grad.add_color_stop_rgba(1, *BLOOM, 0)
             cr.set_source(grad); cr.arc(hxp, hyp, cell * 2.2, 0, 2 * math.pi); cr.fill()
         # -- HUD on the field
         self.text(cr, margin, margin + 14, "SERPENT LINK PROTOCOL // FIELD TELEMETRY", 11, TEXT_DIM, glow=0.15)
@@ -473,9 +477,10 @@ def render_icon(path: str, size: int = 256) -> None:
         cr.rectangle(k * cell - 0.5, cell, 1, size - 2 * cell); cr.rectangle(cell, k * cell - 0.5, size - 2 * cell, 1)
     cr.fill()
     body = [(2, 6), (2, 5), (2, 4), (2, 3), (3, 3), (4, 3), (5, 3), (5, 4), (5, 5), (6, 5)]
+    cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.set_line_join(cairo.LINE_JOIN_ROUND); cr.set_line_width(cell * 0.68)
     for i, (x, y) in enumerate(body):
-        col = HOT if i == len(body) - 1 else mix(TRAIL, LIT, 0.3 + 0.7 * i / len(body))
-        cr.set_source_rgb(*col); r.rrect(cr, x * cell + cell * 0.12, y * cell + cell * 0.12, cell * 0.76, cell * 0.76, cell * 0.2); cr.fill()
+        (cr.move_to if i == 0 else cr.line_to)((x + 0.5) * cell, (y + 0.5) * cell)
+    cr.set_source_rgb(*SNAKE); cr.stroke()
     hx, hy = 6.5 * cell, 5.5 * cell
     g = cairo.RadialGradient(hx, hy, 0, hx, hy, cell * 2.2); g.add_color_stop_rgba(0, *BLOOM, 0.45); g.add_color_stop_rgba(1, *BLOOM, 0)
     cr.set_source(g); cr.arc(hx, hy, cell * 2.2, 0, 2 * math.pi); cr.fill()
