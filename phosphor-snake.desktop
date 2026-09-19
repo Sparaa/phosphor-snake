@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Phosphor Snake
+Comment=Snake on a red-phosphor CRT terminal
+Exec=phosphor-snake
+Icon=phosphor-snake
+Terminal=false
+Categories=Game;ArcadeGame;
+Keywords=snake;retro;crt;terminal;
