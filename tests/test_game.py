@@ -9,12 +9,24 @@ class GameRules(unittest.TestCase):
     def game(self, **kw):
         g = ps.Game(cols=12, rows=8, seed=1, **kw); g.reset(); g.state = "playing"; return g
 
-    def test_moves_and_leaves_embers(self):
+    def test_moves_as_a_solid_body_with_no_trail(self):
         g = self.game(); head = g.snake[0]; tail = g.snake[-1]
         g.step()
         self.assertEqual(g.snake[0], (head[0] + 1, head[1]))
-        self.assertIn(tail, g.embers)
+        self.assertNotIn(tail, g.snake); self.assertEqual(g.embers, {})    # the vacated cell is simply empty
         self.assertEqual(g.length, 4)
+
+    def test_glide_progress_and_turns_latch_at_cell_boundaries(self):
+        g = self.game(); g.acc = 0
+        g.tick(g.step_ms / 1000 * 0.5)
+        self.assertAlmostEqual(g.progress, 0.5, places=2)                  # half-way into the next cell
+        g.turn("up")
+        self.assertEqual(g.direction, "right")                               # the glide in flight keeps its heading
+        g.tick(g.step_ms / 1000 * 0.5 + 1e-4)
+        self.assertEqual(g.direction, "up")                                 # ...and the turn applies from the boundary
+        self.assertLess(g.progress, 0.05)
+        hx, hy = g.snake[0]; g.food = (hx, hy - 1)
+        self.assertTrue(g.will_grow())
 
     def test_eats_grows_scores_and_speeds_up(self):
         g = self.game(); hx, hy = g.snake[0]; g.food = (hx + 1, hy); ms0 = g.step_ms

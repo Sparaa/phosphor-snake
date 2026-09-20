@@ -143,12 +143,27 @@ class Game:
             self.reset()
 
     # -- simulation
-    def step(self) -> None:
-        if self.queue:
-            self.direction = self.queue.popleft()
+    def next_head(self) -> tuple[int, int]:
+        """The cell the head is moving into (unwrapped: may lie one past the field edge)."""
         dx, dy = DIRS[self.direction]
         hx, hy = self.snake[0]
-        nx, ny = hx + dx, hy + dy
+        return hx + dx, hy + dy
+
+    def will_grow(self) -> bool:
+        nx, ny = self.next_head()
+        if self.wrap:
+            nx, ny = nx % self.cols, ny % self.rows
+        return (nx, ny) == self.food
+
+    @property
+    def progress(self) -> float:
+        """0..1: how far the snake is between its last cell boundary and the next (drives the smooth render)."""
+        return 0.0 if self.state == "attract" else max(0.0, min(1.0, self.acc / self.step_ms))
+
+    def step(self) -> None:
+        # `direction` was latched at the previous boundary, so what the frame drew the head gliding toward is the
+        # cell it now enters; a queued turn takes effect from here (the next glide), never mid-cell.
+        nx, ny = self.next_head()
         if self.wrap:
             nx, ny = nx % self.cols, ny % self.rows
         elif not (0 <= nx < self.cols and 0 <= ny < self.rows):
@@ -160,6 +175,8 @@ class Game:
         if (nx, ny) in body:
             return self._die("SELF CONTACT")
         self.snake.appendleft((nx, ny))
+        if self.queue:
+            self.direction = self.queue.popleft()
         if grow:
             self.eaten += 1
             gained = 10 + self.length // 5
@@ -171,7 +188,7 @@ class Game:
                 self.best = self.score
                 self._save_best()
         else:
-            self.embers[self.snake.pop()] = 1.0
+            self.snake.pop()               # solid body only: no phosphor trail behind the tail (2026-09-19)
 
     def _die(self, why: str) -> None:
         self.state = "over"
@@ -361,24 +378,38 @@ class Renderer:
             cr.set_source_rgba(*PEAK, 0.5 + 0.4 * pulse); cr.set_line_width(1.2)
             cr.arc(fxp, fyp, cell * (0.42 + 0.1 * pulse), 0, 2 * math.pi); cr.stroke()
         # snake: one continuous rounded stroke through the cell centres, one colour head to tail (a sub-path
-        # restarts where the body wraps across the field edge); the head gets a soft aura, not a brighter body
+        # restarts where the body wraps across the field edge); the head gets a soft aura, not a brighter body.
+        # Smooth motion: between grid steps the head is drawn `progress` of the way into the cell it is entering
+        # and the tail `progress` of the way out of its cell (unless the coming step grows), so the body glides
+        # at a constant speed instead of jumping a cell every step. Clipped to the field for the wrap case.
         n = len(g.snake)
+        centre = lambda c: (gx + (c[0] + 0.5) * cell, gy + (c[1] + 0.5) * cell)
+        adjacent = lambda a, b: abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1
+        prog = g.progress if g.state in ("playing", "paused") else 0.0
+        hxp, hyp = centre(g.snake[0]) if n else (0.0, 0.0)
+        if n and prog > 0:
+            dx, dy = DIRS[g.direction]
+            hxp, hyp = hxp + dx * prog * cell, hyp + dy * prog * cell
         if n:
             col = SNAKE if g.state != "over" else mix(SNAKE, DIM, 1 - g.burst)
+            cr.save(); cr.rectangle(gx, gy, gw, gh); cr.clip()
             cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.set_line_join(cairo.LINE_JOIN_ROUND); cr.set_line_width(cell * 0.68)
             cr.new_path()
+            cr.move_to(hxp, hyp); cr.line_to(hxp, hyp)          # a zero-length segment still draws its round cap
             prev = None
-            for cx, cy in g.snake:
-                px, py = gx + (cx + 0.5) * cell, gy + (cy + 0.5) * cell
-                if prev is None or abs(cx - prev[0]) + abs(cy - prev[1]) != 1:
-                    cr.move_to(px, py); cr.line_to(px, py)      # a zero-length segment still draws its round cap
+            for i, c in enumerate(g.snake):
+                px, py = centre(c)
+                if i == n - 1 and n >= 2 and prog > 0 and not g.will_grow() and adjacent(c, g.snake[-2]):
+                    qx, qy = centre(g.snake[-2])
+                    px, py = px + (qx - px) * prog, py + (qy - py) * prog     # the tail leaves its cell
+                if prev is not None and not adjacent(c, prev):
+                    cr.move_to(px, py); cr.line_to(px, py)
                 else:
                     cr.line_to(px, py)
-                prev = (cx, cy)
+                prev = c
             cr.set_source_rgb(*col); cr.stroke()
+            cr.restore()
         if n and g.state != "over":
-            hx, hy = g.snake[0]
-            hxp, hyp = gx + (hx + 0.5) * cell, gy + (hy + 0.5) * cell
             grad = cairo.RadialGradient(hxp, hyp, cell * 0.3, hxp, hyp, cell * 2.2)
             grad.add_color_stop_rgba(0, *BLOOM, 0.3 + 0.3 * g.hit); grad.add_color_stop_rgba(1, *BLOOM, 0)
             cr.set_source(grad); cr.arc(hxp, hyp, cell * 2.2, 0, 2 * math.pi); cr.fill()
@@ -447,20 +478,19 @@ class Renderer:
 
 # ---------------------------------------------------------------------------------------------- GTK front end
 def demo_game(cols, rows, wrap) -> Game:
-    """A staged mid-game state for --screenshot: a long snake, embers, a fresh hit."""
+    """A staged mid-game state for --screenshot: a long snake caught mid-glide, a fresh hit."""
     g = Game(cols, rows, wrap, seed=7)
     g.reset(); g.state = "playing"
     path = [(6 + i, 7) for i in range(14)] + [(19, 8 + i) for i in range(6)] + [(18 - i, 13) for i in range(8)]
     g.snake = deque(reversed(path))
     g.direction = "left"
-    for i, c in enumerate([(10 - i, 13) for i in range(6)]):
-        g.embers[c] = 0.9 - i * 0.14
     g.food = (24, 5); g.score = 180; g.eaten = 12; g.hit = 0.6
     g.say("TARGET ACQUIRED  +12"); g.say("TARGET ACQUIRED  +13")
     g.state = "paused"                                  # settle the analog layers without moving the snake
     for _ in range(40):
         g.tick(0.05)
     g.state = "playing"; g.hit = 0.6
+    g.acc = g.step_ms * 0.55                              # mid-glide: head and tail between cells
     return g
 
 

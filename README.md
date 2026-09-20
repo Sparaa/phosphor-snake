@@ -7,8 +7,9 @@ Snake on a red-phosphor CRT terminal. Native Linux, one Python file, GTK3 window
 The look is borrowed from two siblings: the **GPU Pulse** telemetry terminal (bezelled panels, `▰▱` segmented meters,
 TERMLINK headers, scanlined graphs) and Soundscape's **pulse** visualizer (the segmented analyzer with phosphor
 persistence and peak hold, the rolling CRT band, the vignette). Here the spectrum analyzer is driven by the game:
-each bar is the snake's body mass in one column of the field, so it dances as you play. Cells the snake leaves keep
-an ember that fades, eating flashes the bezel, and the event log narrates the session.
+each bar is the snake's body mass in one column of the field, so it dances as you play. The snake is one solid
+stroke that glides between cells at a constant speed (turns take effect at cell boundaries), eating flashes the
+bezel, and the event log narrates the session.
 
 ## Run
 
